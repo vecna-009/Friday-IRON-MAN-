@@ -10,7 +10,10 @@ import os
 import platform
 import re
 import subprocess
+import time
+import webbrowser
 from pathlib import Path
+from urllib.parse import quote_plus
 
 import httpx
 from dotenv import load_dotenv
@@ -58,6 +61,10 @@ def _pc_automation_enabled() -> bool:
 
 def _shell_enabled() -> bool:
     return os.getenv("FRIDAY_ENABLE_SHELL", "0").lower() in {"1", "true", "yes", "on"}
+
+
+def _autopilot_enabled() -> bool:
+    return os.getenv("FRIDAY_ENABLE_AUTOPILOT", "0").lower() in {"1", "true", "yes", "on"}
 
 
 def _allowed_roots() -> list[Path]:
@@ -283,6 +290,41 @@ def register(mcp):
             return {"error": str(exc)}
 
     @mcp.tool()
+    def open_url(url: str) -> dict:
+        """Open a URL in the system's default browser."""
+        if not _pc_automation_enabled():
+            return {"error": "PC automation is disabled. Set FRIDAY_ENABLE_PC_AUTOMATION=1."}
+
+        target = url.strip()
+        if not target:
+            return {"error": "URL cannot be empty."}
+        if not (target.startswith("http://") or target.startswith("https://")):
+            target = "https://" + target
+
+        try:
+            ok = webbrowser.open(target)
+            return {"ok": bool(ok), "opened_url": target}
+        except Exception as exc:
+            return {"error": str(exc)}
+
+    @mcp.tool()
+    def search_youtube(query: str) -> dict:
+        """Open YouTube search results for a query in the browser."""
+        if not _pc_automation_enabled():
+            return {"error": "PC automation is disabled. Set FRIDAY_ENABLE_PC_AUTOMATION=1."}
+
+        q = query.strip()
+        if not q:
+            return {"error": "Search query cannot be empty."}
+
+        url = f"https://www.youtube.com/results?search_query={quote_plus(q)}"
+        try:
+            ok = webbrowser.open(url)
+            return {"ok": bool(ok), "opened_url": url, "query": q}
+        except Exception as exc:
+            return {"error": str(exc)}
+
+    @mcp.tool()
     def run_powershell(command: str, timeout_seconds: int = 12) -> dict:
         """Run a guarded PowerShell command. Disabled by default."""
         if not _pc_automation_enabled():
@@ -409,3 +451,123 @@ def register(mcp):
             return result or "I fetched the page, but could not produce a reliable analysis."
         except Exception as exc:
             return f"Browser URL analysis failed: {exc}"
+
+    @mcp.tool()
+    def run_instruction_plan(plan: str, stop_on_error: bool = True) -> dict:
+        """
+        Execute a multi-step plan line-by-line in autopilot mode.
+
+        Supported steps (one per line):
+        - open_url <url>
+        - search_youtube <query>
+        - launch_app <command>
+        - run_powershell <command>
+        - save_instruction <text>
+        - wait <seconds>
+        """
+        if not _pc_automation_enabled():
+            return {"error": "PC automation is disabled. Set FRIDAY_ENABLE_PC_AUTOMATION=1."}
+        if not _autopilot_enabled():
+            return {"error": "Autopilot is disabled. Set FRIDAY_ENABLE_AUTOPILOT=1."}
+
+        lines = [ln.strip() for ln in plan.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+        if not lines:
+            return {"error": "No executable steps found in plan."}
+
+        results: list[dict] = []
+        ok_count = 0
+
+        for idx, line in enumerate(lines, start=1):
+            action, arg = (line.split(" ", 1) + [""])[:2]
+            action = action.strip().lower()
+            arg = arg.strip()
+            step_result: dict = {"step": idx, "input": line, "action": action}
+
+            try:
+                if action == "open_url":
+                    target = arg if arg.startswith(("http://", "https://")) else f"https://{arg}"
+                    opened = webbrowser.open(target)
+                    step_result.update({"status": "ok", "opened_url": target, "opened": bool(opened)})
+
+                elif action == "search_youtube":
+                    if not arg:
+                        raise ValueError("search_youtube requires a query")
+                    url = f"https://www.youtube.com/results?search_query={quote_plus(arg)}"
+                    opened = webbrowser.open(url)
+                    step_result.update({"status": "ok", "opened_url": url, "opened": bool(opened)})
+
+                elif action == "launch_app":
+                    if not arg:
+                        raise ValueError("launch_app requires a command")
+                    first_token = arg.split()[0].lower().replace(".exe", "")
+                    if first_token not in _allowed_apps():
+                        raise PermissionError(
+                            f"App not allowed: {first_token}. Allowed: {', '.join(sorted(_allowed_apps()))}"
+                        )
+                    subprocess.Popen(arg, shell=True)
+                    step_result.update({"status": "ok", "launched": arg})
+
+                elif action == "run_powershell":
+                    if not _shell_enabled():
+                        raise PermissionError("Shell execution disabled. Set FRIDAY_ENABLE_SHELL=1.")
+                    if not arg:
+                        raise ValueError("run_powershell requires a command")
+                    denied = _command_denied(arg)
+                    if denied:
+                        raise PermissionError(f"Command blocked by safety rule: {denied}")
+                    completed = subprocess.run(
+                        ["powershell", "-NoProfile", "-Command", arg],
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    step_result.update(
+                        {
+                            "status": "ok" if completed.returncode == 0 else "error",
+                            "returncode": completed.returncode,
+                            "stdout": completed.stdout[:2000],
+                            "stderr": completed.stderr[:1000],
+                        }
+                    )
+
+                elif action == "save_instruction":
+                    if not arg:
+                        raise ValueError("save_instruction requires text")
+                    memory_dir = _ensure_path_allowed(str(Path.cwd() / ".friday"))
+                    memory_dir.mkdir(parents=True, exist_ok=True)
+                    file_path = memory_dir / "instructions.txt"
+                    timestamp = datetime.datetime.now().isoformat(timespec="seconds")
+                    with file_path.open("a", encoding="utf-8") as f:
+                        f.write(f"[{timestamp}] {arg}\n")
+                    step_result.update({"status": "ok", "saved_to": str(file_path)})
+
+                elif action == "wait":
+                    seconds = max(0.0, min(float(arg or "1"), 20.0))
+                    time.sleep(seconds)
+                    step_result.update({"status": "ok", "waited_seconds": seconds})
+
+                else:
+                    raise ValueError(f"Unsupported action: {action}")
+
+                if step_result.get("status") == "ok":
+                    ok_count += 1
+
+            except Exception as exc:
+                step_result.update({"status": "error", "error": str(exc)})
+                if stop_on_error:
+                    results.append(step_result)
+                    return {
+                        "ok": False,
+                        "completed_steps": ok_count,
+                        "total_steps": len(lines),
+                        "results": results,
+                    }
+
+            results.append(step_result)
+
+        return {
+            "ok": ok_count == len(lines),
+            "completed_steps": ok_count,
+            "total_steps": len(lines),
+            "results": results,
+        }

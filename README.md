@@ -124,6 +124,7 @@ Copy `.env.example` → `.env` and fill in the values below.
 | `OPENROUTER_X_TITLE` | optional | Friendly app name sent in request headers. |
 | `FRIDAY_ENABLE_PC_AUTOMATION` | optional | `1` enables local file/app automation tools. Default `0`. |
 | `FRIDAY_ENABLE_SHELL` | optional | `1` enables guarded PowerShell tool. Default `0`. |
+| `FRIDAY_ENABLE_AUTOPILOT` | optional | `1` enables multi-step instruction runner. Default `0`. |
 | `FRIDAY_ALLOWED_ROOTS` | optional | Semicolon-separated folder allowlist for file tools. |
 | `FRIDAY_ALLOWED_APPS` | optional | Comma-separated allowlist for app launches. |
 | `SARVAM_API_KEY` | ✅ (default STT) | [dashboard.sarvam.ai](https://dashboard.sarvam.ai) |
@@ -139,11 +140,23 @@ When `FRIDAY_ENABLE_PC_AUTOMATION=1`, FRIDAY can use:
 - `read_text_file(path)`
 - `write_text_file(path, content, append)`
 - `launch_app(command)` (allowlisted apps only)
+- `open_url(url)`
+- `search_youtube(query)`
 - `save_instruction(note)`
+- `run_instruction_plan(plan, stop_on_error)`
 
 If `FRIDAY_ENABLE_SHELL=1`, FRIDAY can also use:
 
 - `run_powershell(command, timeout_seconds)` with destructive command blocking.
+
+Autopilot plan format example:
+
+```text
+open_url youtube.com
+search_youtube believer imagine dragons
+launch_app notepad
+run_powershell Get-Process | Select-Object -First 5
+```
 
 ---
 
