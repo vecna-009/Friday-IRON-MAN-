@@ -4,7 +4,8 @@ param(
     [int]$IntervalSeconds = 30
 )
 
-$scriptPath = Join-Path $RepoPath "scripts\auto_git_sync.ps1"
+$resolvedRepoPath = (Resolve-Path $RepoPath).Path
+$scriptPath = Join-Path $resolvedRepoPath "scripts\auto_git_sync.ps1"
 if (-not (Test-Path $scriptPath)) {
     throw "Cannot find $scriptPath"
 }
@@ -12,8 +13,10 @@ if (-not (Test-Path $scriptPath)) {
 $startupDir = [Environment]::GetFolderPath("Startup")
 $launcherPath = Join-Path $startupDir "FridayAutoGitSync.cmd"
 
-$cmdContent = "@echo off`r`n" +
-    "powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `""$scriptPath`"" -RepoPath `""$RepoPath`"" -Branch `""$Branch`"" -IntervalSeconds $IntervalSeconds`r`n"
+$cmdContent = @"
+@echo off
+powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""$scriptPath"" -RepoPath ""$resolvedRepoPath"" -Branch ""$Branch"" -IntervalSeconds $IntervalSeconds
+"@
 
 Set-Content -Path $launcherPath -Value $cmdContent -Encoding ASCII
 Write-Host "Startup launcher created: $launcherPath"
