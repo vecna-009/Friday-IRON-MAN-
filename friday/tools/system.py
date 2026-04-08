@@ -67,6 +67,10 @@ def _autopilot_enabled() -> bool:
     return os.getenv("FRIDAY_ENABLE_AUTOPILOT", "0").lower() in {"1", "true", "yes", "on"}
 
 
+def _deep_browser_enabled() -> bool:
+    return os.getenv("FRIDAY_ENABLE_DEEP_BROWSER_CONTROL", "0").lower() in {"1", "true", "yes", "on"}
+
+
 def _allowed_roots() -> list[Path]:
     configured = os.getenv("FRIDAY_ALLOWED_ROOTS", "")
     if not configured.strip():
@@ -120,6 +124,17 @@ def _command_denied(command: str) -> str | None:
         if re.search(pattern, lowered):
             return pattern
     return None
+
+
+def _load_pyautogui():
+    try:
+        import pyautogui  # type: ignore
+
+        pyautogui.FAILSAFE = True
+        pyautogui.PAUSE = 0.03
+        return pyautogui, None
+    except Exception as exc:
+        return None, str(exc)
 
 
 async def _openrouter_chat(messages: list[dict], model: str, max_tokens: int = 220) -> str:
@@ -321,6 +336,114 @@ def register(mcp):
         try:
             ok = webbrowser.open(url)
             return {"ok": bool(ok), "opened_url": url, "query": q}
+        except Exception as exc:
+            return {"error": str(exc)}
+
+    @mcp.tool()
+    def browser_scroll(direction: str = "down", amount: int = 700) -> dict:
+        """Scroll active browser tab up or down by pixel-like amount."""
+        if not _pc_automation_enabled():
+            return {"error": "PC automation is disabled. Set FRIDAY_ENABLE_PC_AUTOMATION=1."}
+        if not _deep_browser_enabled():
+            return {"error": "Deep browser control disabled. Set FRIDAY_ENABLE_DEEP_BROWSER_CONTROL=1."}
+
+        pyautogui, err = _load_pyautogui()
+        if pyautogui is None:
+            return {"error": f"pyautogui not available: {err}"}
+
+        step = max(50, min(abs(int(amount)), 3000))
+        signed = -step if direction.strip().lower() == "down" else step
+        try:
+            pyautogui.scroll(signed)
+            return {"ok": True, "direction": direction, "amount": step}
+        except Exception as exc:
+            return {"error": str(exc)}
+
+    @mcp.tool()
+    def browser_click(x: int, y: int, button: str = "left", clicks: int = 1) -> dict:
+        """Click at screen coordinates to control browser UI elements."""
+        if not _pc_automation_enabled():
+            return {"error": "PC automation is disabled. Set FRIDAY_ENABLE_PC_AUTOMATION=1."}
+        if not _deep_browser_enabled():
+            return {"error": "Deep browser control disabled. Set FRIDAY_ENABLE_DEEP_BROWSER_CONTROL=1."}
+
+        pyautogui, err = _load_pyautogui()
+        if pyautogui is None:
+            return {"error": f"pyautogui not available: {err}"}
+
+        btn = button.strip().lower()
+        if btn not in {"left", "right", "middle"}:
+            return {"error": "button must be one of: left, right, middle"}
+
+        try:
+            pyautogui.click(int(x), int(y), clicks=max(1, min(int(clicks), 5)), button=btn)
+            return {"ok": True, "x": int(x), "y": int(y), "button": btn, "clicks": int(clicks)}
+        except Exception as exc:
+            return {"error": str(exc)}
+
+    @mcp.tool()
+    def browser_hotkey(keys: str) -> dict:
+        """Send hotkey combo to active browser, e.g. 'ctrl+l' or 'ctrl+tab'."""
+        if not _pc_automation_enabled():
+            return {"error": "PC automation is disabled. Set FRIDAY_ENABLE_PC_AUTOMATION=1."}
+        if not _deep_browser_enabled():
+            return {"error": "Deep browser control disabled. Set FRIDAY_ENABLE_DEEP_BROWSER_CONTROL=1."}
+
+        pyautogui, err = _load_pyautogui()
+        if pyautogui is None:
+            return {"error": f"pyautogui not available: {err}"}
+
+        parts = [p.strip().lower() for p in keys.split("+") if p.strip()]
+        if not parts:
+            return {"error": "keys cannot be empty"}
+
+        allowed = {
+            "ctrl", "shift", "alt", "win", "tab", "enter", "space", "k", "j", "l", "f", "m", "t", "n", "p", "left", "right", "up", "down", "home", "end", "pgup", "pgdn", "esc", "backspace", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0",
+        }
+        unknown = [k for k in parts if k not in allowed]
+        if unknown:
+            return {"error": f"Unsupported key(s): {unknown}"}
+
+        try:
+            pyautogui.hotkey(*parts)
+            return {"ok": True, "sent": parts}
+        except Exception as exc:
+            return {"error": str(exc)}
+
+    @mcp.tool()
+    def youtube_control(action: str) -> dict:
+        """Control active YouTube tab: play_pause, next, previous, seek_forward, seek_back, fullscreen, mute, theater."""
+        if not _pc_automation_enabled():
+            return {"error": "PC automation is disabled. Set FRIDAY_ENABLE_PC_AUTOMATION=1."}
+        if not _deep_browser_enabled():
+            return {"error": "Deep browser control disabled. Set FRIDAY_ENABLE_DEEP_BROWSER_CONTROL=1."}
+
+        pyautogui, err = _load_pyautogui()
+        if pyautogui is None:
+            return {"error": f"pyautogui not available: {err}"}
+
+        action_key = action.strip().lower()
+        mapping: dict[str, tuple[str, ...]] = {
+            "play_pause": ("k",),
+            "next": ("shift", "n"),
+            "previous": ("shift", "p"),
+            "seek_forward": ("l",),
+            "seek_back": ("j",),
+            "fullscreen": ("f",),
+            "mute": ("m",),
+            "theater": ("t",),
+        }
+
+        combo = mapping.get(action_key)
+        if not combo:
+            return {"error": f"Unsupported action: {action_key}", "supported": sorted(mapping.keys())}
+
+        try:
+            if len(combo) == 1:
+                pyautogui.press(combo[0])
+            else:
+                pyautogui.hotkey(*combo)
+            return {"ok": True, "action": action_key}
         except Exception as exc:
             return {"error": str(exc)}
 

@@ -125,6 +125,7 @@ Copy `.env.example` → `.env` and fill in the values below.
 | `FRIDAY_ENABLE_PC_AUTOMATION` | optional | `1` enables local file/app automation tools. Default `0`. |
 | `FRIDAY_ENABLE_SHELL` | optional | `1` enables guarded PowerShell tool. Default `0`. |
 | `FRIDAY_ENABLE_AUTOPILOT` | optional | `1` enables multi-step instruction runner. Default `0`. |
+| `FRIDAY_ENABLE_DEEP_BROWSER_CONTROL` | optional | `1` enables mouse/keyboard browser control tools. Default `0`. |
 | `FRIDAY_ALLOWED_ROOTS` | optional | Semicolon-separated folder allowlist for file tools. |
 | `FRIDAY_ALLOWED_APPS` | optional | Comma-separated allowlist for app launches. |
 | `SARVAM_API_KEY` | ✅ (default STT) | [dashboard.sarvam.ai](https://dashboard.sarvam.ai) |
@@ -142,6 +143,10 @@ When `FRIDAY_ENABLE_PC_AUTOMATION=1`, FRIDAY can use:
 - `launch_app(command)` (allowlisted apps only)
 - `open_url(url)`
 - `search_youtube(query)`
+- `browser_scroll(direction, amount)`
+- `browser_click(x, y, button, clicks)`
+- `browser_hotkey(keys)`
+- `youtube_control(action)`
 - `save_instruction(note)`
 - `run_instruction_plan(plan, stop_on_error)`
 

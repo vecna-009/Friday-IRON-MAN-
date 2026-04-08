@@ -8,6 +8,7 @@ dependencies = [
     "fastmcp",
     "httpx",
     "livekit-agents[deepgram,openai,sarvam,silero]>=1.5.1",
+    "pyautogui>=0.9.54",
     "python-dotenv",
 ]
 
