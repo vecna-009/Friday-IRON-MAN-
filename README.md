@@ -126,6 +126,12 @@ Copy `.env.example` → `.env` and fill in the values below.
 | `FRIDAY_ENABLE_SHELL` | optional | `1` enables guarded PowerShell tool. Default `0`. |
 | `FRIDAY_ENABLE_AUTOPILOT` | optional | `1` enables multi-step instruction runner. Default `0`. |
 | `FRIDAY_ENABLE_DEEP_BROWSER_CONTROL` | optional | `1` enables mouse/keyboard browser control tools. Default `0`. |
+| `FRIDAY_ENABLE_PERSONAL_MONITOR` | optional | `1` enables notes/tasks/calendar/notifications monitor tools. Default `0`. |
+| `FRIDAY_MONITOR_CACHE_SECONDS` | optional | Cache TTL for monitor tools (1-60s). Default `8`. |
+| `FRIDAY_NOTES_ROOTS` | optional | Semicolon-separated roots for note scanning. |
+| `FRIDAY_TASK_FILES` | optional | Semicolon-separated task/todo files. |
+| `FRIDAY_CALENDAR_ICS_FILES` | optional | Semicolon-separated `.ics` calendar files. |
+| `FRIDAY_NOTIFICATIONS_DB` | optional | Path to Windows notifications DB (auto-detected if blank). |
 | `FRIDAY_ALLOWED_ROOTS` | optional | Semicolon-separated folder allowlist for file tools. |
 | `FRIDAY_ALLOWED_APPS` | optional | Comma-separated allowlist for app launches. |
 | `SARVAM_API_KEY` | ✅ (default STT) | [dashboard.sarvam.ai](https://dashboard.sarvam.ai) |
@@ -147,6 +153,11 @@ When `FRIDAY_ENABLE_PC_AUTOMATION=1`, FRIDAY can use:
 - `browser_click(x, y, button, clicks)`
 - `browser_hotkey(keys)`
 - `youtube_control(action)`
+- `get_notes_updates(limit, within_hours)`
+- `get_task_digest(limit)`
+- `get_calendar_agenda(limit, hours_ahead)`
+- `get_notification_digest(limit)`
+- `get_productivity_snapshot(limit)`
 - `save_instruction(note)`
 - `run_instruction_plan(plan, stop_on_error)`
 

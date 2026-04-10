@@ -9,6 +9,7 @@ import io
 import os
 import platform
 import re
+import sqlite3
 import subprocess
 import time
 import webbrowser
@@ -19,6 +20,8 @@ import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
+
+_CACHE: dict[str, tuple[float, object]] = {}
 
 
 def _openrouter_headers() -> dict[str, str]:
@@ -69,6 +72,205 @@ def _autopilot_enabled() -> bool:
 
 def _deep_browser_enabled() -> bool:
     return os.getenv("FRIDAY_ENABLE_DEEP_BROWSER_CONTROL", "0").lower() in {"1", "true", "yes", "on"}
+
+
+def _personal_monitor_enabled() -> bool:
+    return os.getenv("FRIDAY_ENABLE_PERSONAL_MONITOR", "0").lower() in {"1", "true", "yes", "on"}
+
+
+def _cache_ttl_seconds() -> float:
+    try:
+        return max(1.0, min(float(os.getenv("FRIDAY_MONITOR_CACHE_SECONDS", "8")), 60.0))
+    except Exception:
+        return 8.0
+
+
+def _cached_value(key: str, producer):
+    now = time.time()
+    ttl = _cache_ttl_seconds()
+    existing = _CACHE.get(key)
+    if existing and (now - existing[0]) <= ttl:
+        return existing[1]
+    value = producer()
+    _CACHE[key] = (now, value)
+    return value
+
+
+def _split_paths_env(var_name: str) -> list[Path]:
+    raw = os.getenv(var_name, "")
+    if not raw.strip():
+        return []
+
+    paths: list[Path] = []
+    for part in raw.split(";"):
+        item = part.strip()
+        if not item:
+            continue
+        try:
+            p = Path(item).expanduser().resolve()
+            paths.append(p)
+        except Exception:
+            continue
+    return paths
+
+
+def _parse_ics_datetime(raw: str) -> datetime.datetime | None:
+    value = raw.strip().replace("Z", "")
+    formats = ["%Y%m%dT%H%M%S", "%Y%m%dT%H%M", "%Y%m%d"]
+    for fmt in formats:
+        try:
+            return datetime.datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _notes_updates(limit: int = 12, within_hours: int = 48) -> list[dict]:
+    roots = _split_paths_env("FRIDAY_NOTES_ROOTS") or [Path.cwd()]
+    cutoff = datetime.datetime.now() - datetime.timedelta(hours=max(1, within_hours))
+    patterns = ["*.md", "*.txt", "*.note"]
+
+    collected: list[dict] = []
+    for root in roots:
+        if not root.exists() or not root.is_dir():
+            continue
+        for pattern in patterns:
+            for p in root.rglob(pattern):
+                try:
+                    stat = p.stat()
+                    mtime = datetime.datetime.fromtimestamp(stat.st_mtime)
+                    if mtime < cutoff:
+                        continue
+                    collected.append(
+                        {
+                            "path": str(p),
+                            "modified": mtime.isoformat(timespec="seconds"),
+                            "size": stat.st_size,
+                        }
+                    )
+                except Exception:
+                    continue
+
+    collected.sort(key=lambda item: item.get("modified", ""), reverse=True)
+    return collected[: max(1, min(limit, 100))]
+
+
+def _task_digest(limit: int = 20) -> list[dict]:
+    task_files = _split_paths_env("FRIDAY_TASK_FILES")
+    if not task_files:
+        local_default = Path.cwd() / ".friday" / "instructions.txt"
+        if local_default.exists():
+            task_files = [local_default]
+
+    task_patterns = re.compile(r"\b(todo|task|fix|follow up|urgent|pending|next)\b", re.IGNORECASE)
+    entries: list[dict] = []
+    for file_path in task_files:
+        try:
+            if not file_path.exists() or not file_path.is_file():
+                continue
+            lines = file_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            for line in lines[-300:]:
+                text = line.strip()
+                if not text:
+                    continue
+                if text.startswith("-") or text.startswith("[") or task_patterns.search(text):
+                    entries.append({"file": str(file_path), "task": text})
+        except Exception:
+            continue
+
+    return entries[-max(1, min(limit, 200)):]
+
+
+def _calendar_agenda(limit: int = 20, hours_ahead: int = 72) -> list[dict]:
+    now = datetime.datetime.now()
+    horizon = now + datetime.timedelta(hours=max(1, hours_ahead))
+    files = _split_paths_env("FRIDAY_CALENDAR_ICS_FILES")
+    events: list[dict] = []
+
+    for file_path in files:
+        try:
+            if not file_path.exists() or not file_path.is_file():
+                continue
+            lines = file_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            event: dict[str, str] = {}
+            in_event = False
+            for line in lines:
+                raw = line.strip()
+                if raw == "BEGIN:VEVENT":
+                    event = {}
+                    in_event = True
+                    continue
+                if raw == "END:VEVENT":
+                    in_event = False
+                    start_raw = event.get("DTSTART", "")
+                    start_dt = _parse_ics_datetime(start_raw)
+                    if start_dt and now <= start_dt <= horizon:
+                        events.append(
+                            {
+                                "title": event.get("SUMMARY", "(untitled)"),
+                                "start": start_dt.isoformat(timespec="minutes"),
+                                "location": event.get("LOCATION", ""),
+                                "source": str(file_path),
+                            }
+                        )
+                    continue
+                if in_event and ":" in raw:
+                    key, val = raw.split(":", 1)
+                    key = key.split(";", 1)[0]
+                    if key in {"SUMMARY", "DTSTART", "LOCATION"}:
+                        event[key] = val.strip()
+        except Exception:
+            continue
+
+    events.sort(key=lambda item: item.get("start", ""))
+    return events[: max(1, min(limit, 100))]
+
+
+def _notification_digest(limit: int = 25) -> list[dict]:
+    configured = os.getenv("FRIDAY_NOTIFICATIONS_DB", "").strip()
+    if configured:
+        db_path = Path(configured).expanduser().resolve()
+    else:
+        local_app_data = os.getenv("LOCALAPPDATA", "")
+        db_path = Path(local_app_data) / "Microsoft" / "Windows" / "Notifications" / "wpndatabase.db"
+
+    if not db_path.exists():
+        return []
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+        conn.row_factory = sqlite3.Row
+    except Exception:
+        return []
+
+    try:
+        tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        candidates = [t for t in tables if "notification" in t.lower()]
+        results: list[dict] = []
+
+        for table in candidates:
+            try:
+                cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+                payload_col = next((c for c in cols if c.lower() in {"payload", "text", "content", "xml"}), None)
+                time_col = next((c for c in cols if c.lower() in {"arrivaltime", "modifiedtime", "expirytime"}), None)
+                if not payload_col:
+                    continue
+
+                select_cols = [payload_col]
+                if time_col:
+                    select_cols.append(time_col)
+                query = f"SELECT {', '.join(select_cols)} FROM {table} ORDER BY ROWID DESC LIMIT {max(1, min(limit, 200))}"
+                rows = conn.execute(query).fetchall()
+                for row in rows:
+                    payload = str(row[payload_col])[:400]
+                    when = str(row[time_col]) if time_col else ""
+                    results.append({"table": table, "time": when, "text": payload})
+            except Exception:
+                continue
+
+        return results[: max(1, min(limit, 200))]
+    finally:
+        conn.close()
 
 
 def _allowed_roots() -> list[Path]:
@@ -183,6 +385,70 @@ def register(mcp):
     def get_active_window() -> dict:
         """Return the current active/foreground window title."""
         return {"active_window_title": _active_window_title()}
+
+    @mcp.tool()
+    def get_notes_updates(limit: int = 12, within_hours: int = 48) -> dict:
+        """Return recently modified notes from configured notes roots."""
+        if not _personal_monitor_enabled():
+            return {"error": "Personal monitor disabled. Set FRIDAY_ENABLE_PERSONAL_MONITOR=1."}
+        items = _cached_value(
+            f"notes:{limit}:{within_hours}",
+            lambda: _notes_updates(limit=limit, within_hours=within_hours),
+        )
+        return {"count": len(items), "items": items}
+
+    @mcp.tool()
+    def get_task_digest(limit: int = 20) -> dict:
+        """Return parsed tasks/todos from configured task files."""
+        if not _personal_monitor_enabled():
+            return {"error": "Personal monitor disabled. Set FRIDAY_ENABLE_PERSONAL_MONITOR=1."}
+        items = _cached_value(f"tasks:{limit}", lambda: _task_digest(limit=limit))
+        return {"count": len(items), "items": items}
+
+    @mcp.tool()
+    def get_calendar_agenda(limit: int = 20, hours_ahead: int = 72) -> dict:
+        """Return upcoming calendar events from configured ICS files."""
+        if not _personal_monitor_enabled():
+            return {"error": "Personal monitor disabled. Set FRIDAY_ENABLE_PERSONAL_MONITOR=1."}
+        items = _cached_value(
+            f"calendar:{limit}:{hours_ahead}",
+            lambda: _calendar_agenda(limit=limit, hours_ahead=hours_ahead),
+        )
+        return {"count": len(items), "items": items}
+
+    @mcp.tool()
+    def get_notification_digest(limit: int = 25) -> dict:
+        """Return recent Windows notification payload snapshots (best-effort)."""
+        if not _personal_monitor_enabled():
+            return {"error": "Personal monitor disabled. Set FRIDAY_ENABLE_PERSONAL_MONITOR=1."}
+        items = _cached_value(f"notifications:{limit}", lambda: _notification_digest(limit=limit))
+        return {"count": len(items), "items": items}
+
+    @mcp.tool()
+    def get_productivity_snapshot(limit: int = 10) -> dict:
+        """Fast combined snapshot of notes, tasks, calendar, and notifications."""
+        if not _personal_monitor_enabled():
+            return {"error": "Personal monitor disabled. Set FRIDAY_ENABLE_PERSONAL_MONITOR=1."}
+
+        notes = _cached_value(f"notes:{limit}:48", lambda: _notes_updates(limit=limit, within_hours=48))
+        tasks = _cached_value(f"tasks:{limit}", lambda: _task_digest(limit=limit))
+        agenda = _cached_value(
+            f"calendar:{limit}:48",
+            lambda: _calendar_agenda(limit=limit, hours_ahead=48),
+        )
+        notifications = _cached_value(
+            f"notifications:{limit}",
+            lambda: _notification_digest(limit=limit),
+        )
+
+        return {
+            "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+            "cache_ttl_seconds": _cache_ttl_seconds(),
+            "notes": notes,
+            "tasks": tasks,
+            "calendar": agenda,
+            "notifications": notifications,
+        }
 
     @mcp.tool()
     def list_files(path: str, max_entries: int = 200) -> dict:
